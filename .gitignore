@@ -3,7 +3,7 @@ logs/
 *.log
 
 # Ignore config files with sensitive information
-config/config.php
+/config/config.php
 
 # Ignore system files
 .DS_Store
@@ -14,7 +14,7 @@ vendor/
 composer.lock
 
 # Ignore PHPStorm IDE files
-.idea/
+/.idea/
 
 # Ignore Sublime Text project files
 *.sublime-project

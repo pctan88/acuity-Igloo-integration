@@ -24,7 +24,7 @@ class CronJob
 
         // Get current time and time for the next hour
         $now = new DateTime();
-        $nextHour = (clone $now)->modify('+2 hour');
+``        $nextHour = (clone $now)->modify('+1 hour');
 
         // Format times in ISO 8601 format with timezone
         $nowFormatted = $now->format('Y-m-d\TH:i:s');
@@ -58,8 +58,8 @@ class CronJob
                 $this->log("Generated 4-digit PIN: $pinCode", $logFile);
 
                 // Send the PIN to Igloo
-                $this->sendToIgloo($pinCode, $logFile);
-                
+                $this->sendToIgloo($pinCode, $appointment, $logFile);
+
                 // Update the appointment with the generated PIN
                 $this->updateAppointmentWithPin($appointment['id'], $pinCode, $logFile);
             }
@@ -77,13 +77,13 @@ class CronJob
     }
 
     // Function to send PIN to Igloo
-    private function sendToIgloo($pinCode, $logFile)
+    private function sendToIgloo($pinCode, $appointment, $logFile)
     {
         // Get Igloo API details
         $deviceId = $this->config['igloo_device_id'];
         $bridgeId = $this->config['igloo_bridge_id'];
         $accessToken = $this->config['igloo_access_token'];
-        
+
         // Construct the Igloo API URL
         $iglooUrl = str_replace(
             ['{deviceId}', '{bridgeId}'],
@@ -91,17 +91,36 @@ class CronJob
             $this->config['igloo_api_url']
         );
 
+        // Parse appointment start time
+        $appointmentStartTime = new DateTime($appointment['datetime']);  // Appointment start time
+        $appointmentEndTime = clone $appointmentStartTime;
+        $appointmentEndTime->modify('+' . $appointment['duration'] . ' minutes');  // Appointment end time
+
+        // Add 10-minute buffer before and after
+        $startDate = clone $appointmentStartTime;
+        $startDate->modify('-10 minutes');  // Buffer of 10 minutes before the appointment
+
+        $endDate = clone $appointmentEndTime;
+        $endDate->modify('+10 minutes');  // Buffer of 10 minutes after the appointment
+
+        // Format start and end times
+        $formattedStartDate = $startDate->format('Y-m-d\TH:i:s+08:00');
+        $formattedEndDate = $endDate->format('Y-m-d\TH:i:s+08:00');
+
         // Set the request payload for creating a PIN
         $postData = [
             'jobType' => 4,  // Create Custom PIN code
             'jobData' => [
-                'accessName' => 'Generated PIN',  // Name for tracking
+                'accessName' => $appointment['firstName'] . ' ' . $appointment['lastName'],  // Use appointment's first and last name
                 'pin' => $pinCode,  // The generated 4-digit PIN
                 'pinType' => 4,  // Duration-based PIN type
-                'startDate' => (new DateTime())->format('Y-m-d\TH:i:s+08:00'),  // Start date of PIN validity
-                'endDate' => (new DateTime('+1 hour'))->format('Y-m-d\TH:i:s+08:00')  // End date of PIN validity
+                'startDate' => $formattedStartDate,  // Start date with buffer
+                'endDate' => $formattedEndDate       // End date with buffer
             ]
         ];
+
+        // Log the request body
+        $this->log("Igloo API Request Body: " . json_encode($postData), $logFile);
 
         // Initialize cURL for the Igloo API call
         $ch = curl_init();
@@ -136,6 +155,9 @@ class CronJob
         // Prepare data to update the notes field
         $putData = ['notes' => $pinCode];
 
+        // Log the request body
+        $this->log("Acuity API Request Body: " . json_encode($putData), $logFile);
+
         // Initialize cURL for the PUT request
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $apiUrl);
@@ -165,4 +187,3 @@ class CronJob
         file_put_contents($file, date('Y-m-d H:i:s') . " - $message\n", FILE_APPEND);
     }
 }
-
