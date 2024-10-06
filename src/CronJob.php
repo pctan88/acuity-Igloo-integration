@@ -49,22 +49,50 @@ class CronJob
         }
 
         $responseData = json_decode($response, true);
-        $this->log("API Response: " . print_r($responseData, true), $logFile);
+        //$this->log("API Response: " . print_r($responseData, true), $logFile);
+        $this->logCleanedResponse($responseData, $logFile);
 
-        // Process appointments and generate PINs
-        if (is_array($responseData) && count($responseData) > 0) {
-            foreach ($responseData as $appointment) {
-                $pinCode = $this->generatePinCode();
-                $this->log("Generated 4-digit PIN: $pinCode", $logFile);
+        // Group appointments by time slot
+        $appointmentsBySlot = [];
+        foreach ($responseData as $appointment) {
+            // Use the start time (e.g., '2024-10-06T15:00:00') as the key for grouping
+            $slotKey = $appointment['datetime'];  // Group by exact appointment time (adjust if needed)
+            if (!isset($appointmentsBySlot[$slotKey])) {
+                $appointmentsBySlot[$slotKey] = [];
+            }
+            $appointmentsBySlot[$slotKey][] = $appointment;
+        }
 
-                // Send the PIN to Igloo
-                $this->sendToIgloo($pinCode, $appointment, $logFile);
+        // Process each time slot
+        foreach ($appointmentsBySlot as $slotKey => $appointments) {
+            // Generate a single PIN for the entire time slot
+            $pinCode = $this->generatePinCode();
+            $this->log("Generated 4-digit PIN for slot $slotKey: $pinCode", $logFile);
 
-                // Update the appointment with the generated PIN
+            // Calculate the start and end time based on the first appointment in the slot
+            $firstAppointment = $appointments[0];
+            $startDate = new DateTime($firstAppointment['datetime']);
+            $endDate = clone $startDate;
+            $endDate->modify('+' . $firstAppointment['duration'] . ' minutes');
+
+            // Add 10-minute buffer before and after
+            $startDate->modify('-10 minutes');
+            $endDate->modify('+10 minutes');
+
+            // Format start and end times
+            $formattedStartDate = $startDate->format('Y-m-d\TH:i:s+08:00');
+            $formattedEndDate = $endDate->format('Y-m-d\TH:i:s+08:00');
+
+            // Create a name for the key based on the time slot, e.g., "3-4pm 6Oct"
+            $timeSlotName = $startDate->format('gA') . '-' . $endDate->format('gA') . ' ' . $startDate->format('dM');
+
+            // Send the PIN to Igloo once for the entire slot with the time slot name as the accessName
+            $this->sendToIgloo($pinCode, $timeSlotName, $formattedStartDate, $formattedEndDate, $logFile);
+
+            // Update all appointments in the slot with the same PIN
+            foreach ($appointments as $appointment) {
                 $this->updateAppointmentWithPin($appointment['id'], $pinCode, $logFile);
             }
-        } else {
-            $this->log("No appointments found in the next hour.", $logFile);
         }
 
         curl_close($ch);
@@ -77,7 +105,7 @@ class CronJob
     }
 
     // Function to send PIN to Igloo
-    private function sendToIgloo($pinCode, $appointment, $logFile)
+    private function sendToIgloo($pinCode, $timeSlotName, $startDate, $endDate, $logFile)
     {
         // Get Igloo API details
         $deviceId = $this->config['igloo_device_id'];
@@ -91,31 +119,15 @@ class CronJob
             $this->config['igloo_api_url']
         );
 
-        // Parse appointment start time
-        $appointmentStartTime = new DateTime($appointment['datetime']);  // Appointment start time
-        $appointmentEndTime = clone $appointmentStartTime;
-        $appointmentEndTime->modify('+' . $appointment['duration'] . ' minutes');  // Appointment end time
-
-        // Add 10-minute buffer before and after
-        $startDate = clone $appointmentStartTime;
-        $startDate->modify('-10 minutes');  // Buffer of 10 minutes before the appointment
-
-        $endDate = clone $appointmentEndTime;
-        $endDate->modify('+10 minutes');  // Buffer of 10 minutes after the appointment
-
-        // Format start and end times
-        $formattedStartDate = $startDate->format('Y-m-d\TH:i:s+08:00');
-        $formattedEndDate = $endDate->format('Y-m-d\TH:i:s+08:00');
-
         // Set the request payload for creating a PIN
         $postData = [
             'jobType' => 4,  // Create Custom PIN code
             'jobData' => [
-                'accessName' => $appointment['firstName'] . ' ' . $appointment['lastName'],  // Use appointment's first and last name
+                'accessName' => $timeSlotName,  // Use the time slot name as accessName
                 'pin' => $pinCode,  // The generated 4-digit PIN
                 'pinType' => 4,  // Duration-based PIN type
-                'startDate' => $formattedStartDate,  // Start date with buffer
-                'endDate' => $formattedEndDate       // End date with buffer
+                'startDate' => $startDate,  // Start date with buffer
+                'endDate' => $endDate       // End date with buffer
             ]
         ];
 
@@ -175,7 +187,8 @@ class CronJob
             $error = curl_error($ch);
             $this->log("Error updating appointment notes: $error", $logFile);
         } else {
-            $this->log("Appointment Updated with PIN: " . print_r(json_decode($response, true), true), $logFile);
+            //$this->log("Appointment Updated with PIN: " . print_r(json_decode($response, true), true), $logFile);
+            $this->logCleanedResponse($responseData, $logFile);
         }
 
         curl_close($ch);
@@ -186,4 +199,31 @@ class CronJob
     {
         file_put_contents($file, date('Y-m-d H:i:s') . " - $message\n", FILE_APPEND);
     }
+
+    private function logCleanedResponse($responseData, $logFile)
+    {
+        // Useful attributes for debugging
+        $usefulAttributes = [
+            'id', 'firstName', 'lastName', 'phone', 'email', 'date', 'time', 'endTime',
+            'dateCreated', 'datetimeCreated', 'datetime', 'price', 'priceSold', 'paid',
+            'amountPaid', 'type', 'appointmentTypeID', 'duration', 'calendar',
+            'calendarID', 'certificate', 'location', 'notes'
+        ];
+
+        $cleanedData = [];
+
+        foreach ($responseData as $appointment) {
+            $cleanedAppointment = [];
+            foreach ($usefulAttributes as $attribute) {
+                if (isset($appointment[$attribute])) {
+                    $cleanedAppointment[$attribute] = $appointment[$attribute];
+                }
+            }
+            $cleanedData[] = $cleanedAppointment;
+        }
+
+        // Log cleaned data
+        $this->log("Cleaned API Response: " . print_r($cleanedData, true), $logFile);
+    }
+
 }
