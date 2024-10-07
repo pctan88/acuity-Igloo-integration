@@ -22,17 +22,24 @@ class CronJob
         $apiKey = $this->config['acuity_api_key'];
         $logFile = $this->config['log_file'];
 
-        // Get current time and time for the next 3 hour
-        $today = new DateTime();
-        $startTime = $today->format('Y-m-d');
-        $endTime = $today->modify('+3 hour')->format('Y-m-d');
+        // Get current time
+        $currentTime = new DateTime();
+        $currentHour = (int) $currentTime->format('H');
+
+        // Process the time slot for 2 hours ahead (for example, if the cron runs at 2:45, it processes the 5-6 PM slot)
+        $startTime = new DateTime($currentTime->format('Y-m-d') . ' ' . ($currentHour + 3) . ':00:00');
+        $endTime = (clone $startTime)->modify('+1 hour');
 
         // Format times in ISO 8601 format with timezone
         $startTimeFormatted = $startTime->format('Y-m-d\TH:i:s');
         $endTimeFormatted = $endTime->format('Y-m-d\TH:i:s');
 
+        // Check for consecutive slots in the next 3 hours (to handle consecutive bookings)
+        $maxConsecutiveTime = (clone $startTime)->modify('+3 hours');
+        $maxConsecutiveFormatted = $maxConsecutiveTime->format('Y-m-d\TH:i:s');
+
         // Append minDate and maxDate query parameters to the API URL
-        $apiUrlWithDate = $apiUrl . '?minDate=' . $startTimeFormatted . '&maxDate=' . $endTimeFormatted;
+        $apiUrlWithDate = $apiUrl . '?minDate=' . $startTimeFormatted . '&maxDate=' . $maxConsecutiveFormatted;
 
         // Fetch appointments
         $ch = curl_init();
@@ -50,22 +57,44 @@ class CronJob
         }
 
         $responseData = json_decode($response, true);
-        $this->logCleanedResponse($responseData, $logFile);  // Log cleaned response
+//        $this->logCleanedResponse($responseData, $logFile);  // Log cleaned response
 
-        // Step 1: Group appointments by user and time slot, ordered by time
+        // Step 1: Sort appointments by time as before
         usort($responseData, function ($a, $b) {
             return strtotime($a['time']) - strtotime($b['time']);
         });
 
+        // Step 2: Group appointments by user and calculate consecutive slots
         $appointmentsByUser = [];
+        $consecutiveCounts = [];  // Store consecutive slot count for each user
         foreach ($responseData as $appointment) {
             $userEmail = $appointment['email'];
             $appointmentsByUser[$userEmail][] = $appointment;
         }
 
-        $usedKeys = [];
+        // Step 3: Calculate consecutive slots for each user
+        foreach ($appointmentsByUser as $userEmail => $appointments) {
+            $lastEndTime = null;
+            $consecutiveCount = 0;  // Tracks how many consecutive appointments the user has
+            foreach ($appointments as $appointment) {
+                $appointmentStartTime = new DateTime($appointment['time']);
+                if ($lastEndTime && $appointmentStartTime == $lastEndTime) {
+                    // Found consecutive slot
+                    $consecutiveCount++;
+                }
+                $lastEndTime = new DateTime($appointment['endTime']);
+            }
+            // Save the consecutive count for the user
+            $consecutiveCounts[$userEmail] = $consecutiveCount + 1; // +1 to include the first appointment
+        }
 
-        // Step 2: Process each user’s appointments in order of time
+        // Step 4: Sort users based on consecutive slots (descending order)
+        uksort($appointmentsByUser, function ($a, $b) use ($consecutiveCounts) {
+            return $consecutiveCounts[$b] - $consecutiveCounts[$a]; // Sort by most consecutive slots first
+        });
+
+        // Step 5: Process each user’s appointments in order of time, with sorted users
+        $usedKeys = [];
         foreach ($appointmentsByUser as $userEmail => $appointments) {
             $lastEndTime = null;
             $currentGroup = [];
@@ -91,12 +120,15 @@ class CronJob
             }
         }
 
+
         curl_close($ch);
     }
 
     // Process group of appointments and assign a single PIN to the group
     private function processAppointmentGroup($appointments, &$usedKeys, $logFile)
     {
+//    $this->log("Processing appointment group: " . print_r($appointments, true), $logFile);
+
         $firstAppointment = reset($appointments);
         $timeSlotKey = $firstAppointment['time'] . '-' . $firstAppointment['endTime'];
 
@@ -105,18 +137,29 @@ class CronJob
             $pinCode = $this->generatePinCode();
             $usedKeys[$timeSlotKey] = $pinCode;
 
-            // Add 10-minute buffer before and after the time slot
+            // Add 10-minute buffer before the start time of the first appointment
             $startDateTime = new DateTime($firstAppointment['datetime']);
-            $endDateTime = (clone $startDateTime)->modify('+' . $firstAppointment['duration'] . ' minutes');
             $startDateTime->modify('-10 minutes');
-            $endDateTime->modify('+10 minutes');
 
-            // Format the start and end dates
+            // Find the maximum duration in the group of appointments
+            $totalDuration = 0;
+            foreach ($appointments as $appointment) {
+                $totalDuration+= $appointment['duration'];
+            }
+
+            // Calculate the end time based on the maximum duration
+            $endDateTime = new DateTime($firstAppointment['datetime']);
+            $endDateTime->modify('+' . $totalDuration . ' minutes');
+            $endDateTime->modify('+10 minutes');  // Add 10-minute buffer after the end time
+
+            // Create a timeSlotName based on the appointment time, not the buffer
+            $appointmentStartTime = new DateTime($firstAppointment['time']);
+            $appointmentEndTime = clone $endDateTime;  // Use the calculated end time
+            $timeSlotName = $appointmentStartTime->format('gA') . '-' . $appointmentEndTime->format('gA') . ' ' . $appointmentStartTime->format('dM');
+
+            // Format the start and end dates with the buffer
             $formattedStartDate = $startDateTime->format('Y-m-d\TH:i:s+08:00');
             $formattedEndDate = $endDateTime->format('Y-m-d\TH:i:s+08:00');
-
-            // Create a name for the key based on the time slot, e.g., "2PM-4PM 06Oct"
-            $timeSlotName = $startDateTime->format('gA') . '-' . $endDateTime->format('gA') . ' ' . $startDateTime->format('dM');
 
             // Send the PIN to Igloo for the entire time slot
             $this->sendToIgloo($pinCode, $timeSlotName, $formattedStartDate, $formattedEndDate, $logFile);
@@ -217,7 +260,7 @@ class CronJob
             $error = curl_error($ch);
             $this->log("Error updating appointment notes: $error", $logFile);
         } else {
-            $this->log("Appointment Updated with PIN: " . print_r(json_decode($response, true), true), $logFile);
+    //        $this->log("Appointment Updated with PIN: " . print_r(json_decode($response, true), true), $logFile);
         }
 
         curl_close($ch);
