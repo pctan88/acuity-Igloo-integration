@@ -15,33 +15,50 @@ class CronJob
     {
         // Set the correct time zone
         date_default_timezone_set('Asia/Singapore');  // Adjust this to your time zone
+        $logFile = $this->config['log_file'];
 
-        // Get Acuity API details
+        // Get current time
+        //$currentTime = new DateTime();
+        //$currentHour = (int) $currentTime->format('H');
+
+        $currentTime = new DateTime();
+        $currentTime->modify('-1 day');
+        $currentHour = (int) 14;
+
+        // Process the time slot for 3 hours ahead (for example, if the cron runs at 1:45, it processes the 5-6 PM slot)
+        $startTime = new DateTime($currentTime->format('Y-m-d') . ' ' . ($currentHour + 3) . ':00:00');
+        $endTime = (clone $startTime)->modify('+1 hour');
+
+        // Check for consecutive slots in the next 3 hours (to handle consecutive bookings)
+        $maxConsecutiveTime = (clone $startTime)->modify('+3 hours');
+
+        // Fetch appointments for the current time slot
+        $responseData = $this->fetchAppointments($startTime, $maxConsecutiveTime);
+
+        // If no appointments found, log and exit
+        if (empty($responseData)) {
+            $this->log("No appointments found for time slot: " . $startTime->format('gA') . '-' . $endTime->format('gA'), $this->config['log_file']);
+            return;
+        }
+
+//        $this->logCleanedResponse($responseData, $logFile);  // Log cleaned response
+
+        $this->processAppointments($responseData, $startTime, $endTime);
+        $this->log("Cron job completed successfully", $this->config['log_file']);
+    }
+
+    private function fetchAppointments($startTime, $endTime)
+    {
         $apiUrl = $this->config['acuity_api_url'];
         $userId = $this->config['acuity_user_id'];
         $apiKey = $this->config['acuity_api_key'];
         $logFile = $this->config['log_file'];
 
-        // Get current time
-        $currentTime = new DateTime();
-        $currentHour = (int) $currentTime->format('H');
-
-        // Process the time slot for 2 hours ahead (for example, if the cron runs at 2:45, it processes the 5-6 PM slot)
-        $startTime = new DateTime($currentTime->format('Y-m-d') . ' ' . ($currentHour + 3) . ':00:00');
-        $endTime = (clone $startTime)->modify('+1 hour');
-
-        // Format times in ISO 8601 format with timezone
-        $startTimeFormatted = $startTime->format('Y-m-d\TH:i:s');
-        $endTimeFormatted = $endTime->format('Y-m-d\TH:i:s');
-
-        // Check for consecutive slots in the next 3 hours (to handle consecutive bookings)
-        $maxConsecutiveTime = (clone $startTime)->modify('+3 hours');
-        $maxConsecutiveFormatted = $maxConsecutiveTime->format('Y-m-d\TH:i:s');
-
         // Append minDate and maxDate query parameters to the API URL
-        $apiUrlWithDate = $apiUrl . '?minDate=' . $startTimeFormatted . '&maxDate=' . $maxConsecutiveFormatted;
+        $apiUrlWithDate = $apiUrl . '?minDate=' . $startTime->format('Y-m-d\TH:i:s') . '&maxDate=' . $endTime->format('Y-m-d\TH:i:s');
 
-        // Fetch appointments
+//        $this->log("API Request Body: " . $apiUrlWithDate, $logFile);
+        // Make the API request
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $apiUrlWithDate);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -49,16 +66,34 @@ class CronJob
         curl_setopt($ch, CURLOPT_USERPWD, "$userId:$apiKey");
 
         $response = curl_exec($ch);
-
         if ($response === false) {
             $error = curl_error($ch);
-            $this->log("Error: $error", $logFile);
-            return;
+            $this->log("Error fetching appointments: " . $error, $logFile);
+            curl_close($ch);
+            return [];
         }
 
-        $responseData = json_decode($response, true);
-//        $this->logCleanedResponse($responseData, $logFile);  // Log cleaned response
+        curl_close($ch);
 
+        // Check if the response is empty or invalid
+        if (empty($response)) {
+            $this->log("No response or empty response from Acuity API", $logFile);
+            return [];
+        }
+
+        // If response is already processed and cleaned, no need to use json_decode again
+        $responseData = json_decode($response, true);
+        if (!is_array($responseData)) {
+            $this->log("Invalid response data: " . print_r($response, true), $logFile);
+            return [];
+        }
+
+        return $responseData;
+    }
+
+    private function processAppointments($responseData, $startTime, $endTime)
+    {
+        $logFile = $this->config['log_file'];
         // Step 1: Sort appointments by time as before
         usort($responseData, function ($a, $b) {
             return strtotime($a['time']) - strtotime($b['time']);
@@ -68,6 +103,11 @@ class CronJob
         $appointmentsByUser = [];
         $consecutiveCounts = [];  // Store consecutive slot count for each user
         foreach ($responseData as $appointment) {
+        // Skip if the appointment already has a PIN in the 'notes' field
+                    if (!empty($appointment['notes'])) {
+                        continue;
+                    }
+
             $userEmail = $appointment['email'];
             $appointmentsByUser[$userEmail][] = $appointment;
         }
@@ -107,7 +147,7 @@ class CronJob
                 } else {
                     // Non-consecutive, process previous group if exists
                     if (!empty($currentGroup)) {
-                        $this->processAppointmentGroup($currentGroup, $usedKeys, $logFile);
+                        $this->processAppointmentGroup($currentGroup, $usedKeys, $logFile, $startTime);
                     }
                     // Start new group
                     $currentGroup = [$appointment];
@@ -116,20 +156,23 @@ class CronJob
             }
             // Process the last group
             if (!empty($currentGroup)) {
-                $this->processAppointmentGroup($currentGroup, $usedKeys, $logFile);
+                $this->processAppointmentGroup($currentGroup, $usedKeys, $logFile, $startTime);
             }
         }
-
-
-        curl_close($ch);
     }
 
     // Process group of appointments and assign a single PIN to the group
-    private function processAppointmentGroup($appointments, &$usedKeys, $logFile)
+    private function processAppointmentGroup($appointments, &$usedKeys, $logFile, $startTime)
     {
-//    $this->log("Processing appointment group: " . print_r($appointments, true), $logFile);
-
         $firstAppointment = reset($appointments);
+        $appointmentStartTime = new DateTime($firstAppointment['date'] . ' ' . $firstAppointment['time']);
+
+        // Check if the first appointment's start time matches the input start time
+        if ($appointmentStartTime != $startTime) {
+            $this->log("Skipping group. Appointment start time " . $appointmentStartTime->format('Y-m-d H:i:s') . " does not match input start time " . $startTime->format('Y-m-d H:i:s'), $logFile);
+            return;  // Skip this group
+        }
+
         $timeSlotKey = $firstAppointment['time'] . '-' . $firstAppointment['endTime'];
 
         if (!isset($usedKeys[$timeSlotKey])) {
@@ -144,7 +187,7 @@ class CronJob
             // Find the maximum duration in the group of appointments
             $totalDuration = 0;
             foreach ($appointments as $appointment) {
-                $totalDuration+= $appointment['duration'];
+                $totalDuration += $appointment['duration'];
             }
 
             // Calculate the end time based on the maximum duration
