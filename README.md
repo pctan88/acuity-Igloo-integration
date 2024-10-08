@@ -24,13 +24,7 @@ This project is designed to process appointments fetched from Acuity Scheduling,
     git clone https://github.com/your-repo/acuity-igloo-integration.git
     ```
 
-2. Install dependencies (if any):
-
-    ```bash
-    composer install  # If using Composer for dependencies
-    ```
-
-3. Configure environment variables in `config.php`:
+2. Configure environment variables in `config.php`:
 
     ```php
     return [
@@ -38,25 +32,22 @@ This project is designed to process appointments fetched from Acuity Scheduling,
         'acuity_user_id' => 'your_acuity_user_id',
         'acuity_api_key' => 'your_acuity_api_key',
         'igloo_api_url' => 'https://api.igloo.com/pin',
+        'igloo_token_url' => 'https://auth.igloohome.co/oauth2/token',
         'igloo_device_id' => 'your_igloo_device_id',
         'igloo_bridge_id' => 'your_igloo_bridge_id',
+        'igloo_client_id' => 'your-client_id',
+        'igloo_client_secret' => 'your-client_secret',
         'igloo_access_token' => 'your_igloo_access_token',
         'log_file' => '/path/to/your/logfile.log'
     ];
     ```
 
-4. Set up a cron job:
+3. Set up a cron job:
 
     - Add the following cron job to run the PHP script every hour at 45 minutes past the hour:
 
     ```bash
     45 * * * * /usr/bin/php /path/to/project/public/appointmentProcessor.php >> /path/to/logfile.log 2>&1
-    ```
-
-5. (Optional) Set up a separate cron job for renewing the Igloo access token:
-
-    ```bash
-    0 0 * * * /usr/bin/php /path/to/project/public/renew_token.php >> /path/to/logfile.log 2>&1
     ```
 
 ## Usage
@@ -65,25 +56,6 @@ To manually run the cron job (for testing purposes), execute:
 
 ```bash
 php public/appointmentProcessor.php
-```
-
-## Configuration
-
-All API credentials and configuration details are stored in `config.php`. Make sure to update it with your Acuity and Igloo credentials.
-
-Example `config.php`:
-
-```php
-return [
-    'acuity_api_url' => 'https://acuityscheduling.com/api/v1/appointments',
-    'acuity_user_id' => 'your_acuity_user_id',
-    'acuity_api_key' => 'your_acuity_api_key',
-    'igloo_api_url' => 'https://api.igloo.com/pin',
-    'igloo_device_id' => 'your_igloo_device_id',
-    'igloo_bridge_id' => 'your_igloo_bridge_id',
-    'igloo_access_token' => 'your_igloo_access_token',
-    'log_file' => '/path/to/your/logfile.log'
-];
 ```
 
 ## Logs
@@ -107,4 +79,3 @@ Example renewal cron job:
 ## Support
 
 If you encounter any issues or have questions, feel free to open an issue on GitHub.
-
